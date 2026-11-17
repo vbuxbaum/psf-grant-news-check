@@ -1,0 +1,67 @@
+name: Verificar grants da PSF
+
+on:
+  schedule:
+    - cron: '17 12 * * *' # 09:17 em Brasília (UTC-3)
+  workflow_dispatch:
+
+permissions:
+  contents: write # Salvar snapshots na branch monitor-state deste repositório.
+
+concurrency:
+  group: psf-grants-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Validar configuração
+        env:
+          DISCUSSIONS_TOKEN: ${{ secrets.DISCUSSIONS_TOKEN }}
+        run: |
+          if [ -z "$DISCUSSIONS_TOKEN" ]; then
+            echo '::error::Configure o secret DISCUSSIONS_TOKEN (consulte o README).'
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          path: .monitor-state
+      - name: Restaurar referência persistente
+        working-directory: .monitor-state
+        shell: bash
+        run: |
+          git ls-remote --heads origin refs/heads/monitor-state > "$RUNNER_TEMP/monitor-state-ref"
+          if [ -s "$RUNNER_TEMP/monitor-state-ref" ]; then
+            git fetch --depth=1 origin refs/heads/monitor-state
+            git checkout -B monitor-state FETCH_HEAD
+            test -f snapshot.json
+          else
+            git checkout --orphan monitor-state
+            git rm -rf -- .
+          fi
+      - name: Verificar página e publicar mudanças
+        env:
+          DISCUSSIONS_TOKEN: ${{ secrets.DISCUSSIONS_TOKEN }}
+          DISCUSSIONS_REPOSITORY: ${{ vars.DISCUSSIONS_REPOSITORY || 'apyb/comunidade' }}
+          DISCUSSIONS_CATEGORY: ${{ vars.DISCUSSIONS_CATEGORY || 'Geral' }}
+        run: python monitor.py --state .monitor-state/snapshot.json
+      - name: Persistir referência após publicação bem-sucedida
+        working-directory: .monitor-state
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add snapshot.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Atualizar referência da página de grants da PSF'
+            git push origin HEAD:refs/heads/monitor-state
+          fi
